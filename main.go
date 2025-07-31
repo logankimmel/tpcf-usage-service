@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -71,14 +73,129 @@ type CFClient struct {
 	httpClient       *http.Client
 	servicePlans     map[string]ServicePlan
 	serviceOfferings map[string]ServiceOffering
+	apiEndpoint      string
+	accessToken      string
+	useDirectAPI     bool
 }
 
-func NewCFClient() *CFClient {
-	return &CFClient{
-		httpClient:       &http.Client{},
+func NewCFClient() (*CFClient, error) {
+	// Check for SSL verification skip
+	skipSSLVerification := os.Getenv("CF_SKIP_SSL_VALIDATION") == "true"
+	
+	// Configure HTTP client with optional SSL skip
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: skipSSLVerification,
+			},
+		},
+	}
+	
+	if skipSSLVerification {
+		log.Printf("WARNING: SSL certificate verification is disabled")
+	}
+	
+	client := &CFClient{
+		httpClient:       httpClient,
 		servicePlans:     make(map[string]ServicePlan),
 		serviceOfferings: make(map[string]ServiceOffering),
 	}
+	
+	// Check for environment variables for direct API access
+	apiEndpoint := os.Getenv("CF_API_ENDPOINT")
+	username := os.Getenv("CF_USERNAME")
+	password := os.Getenv("CF_PASSWORD")
+	
+	if apiEndpoint != "" && username != "" && password != "" {
+		if err := client.authenticateWithCredentials(apiEndpoint, username, password); err != nil {
+			return nil, fmt.Errorf("failed to authenticate with CF API: %w", err)
+		}
+		client.useDirectAPI = true
+		log.Printf("Using environment variable credentials with direct API calls")
+	} else {
+		log.Printf("Using cf CLI for API calls (set CF_API_ENDPOINT, CF_USERNAME, CF_PASSWORD for direct API access)")
+	}
+	
+	return client, nil
+}
+
+
+func (c *CFClient) authenticateWithCFCLI(apiEndpoint, username, password string) error {
+	log.Printf("Attempting authentication via cf CLI...")
+	
+	// Login using cf CLI
+	loginCmd := exec.Command("cf", "login", "-a", apiEndpoint, "-u", username, "-p", password, "--skip-ssl-validation")
+	if output, err := loginCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("cf login failed: %w\nOutput: %s", err, string(output))
+	}
+	
+	// Get OAuth token from cf CLI
+	tokenCmd := exec.Command("cf", "oauth-token")
+	tokenOutput, err := tokenCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get oauth token: %w", err)
+	}
+	
+	// Parse token (format is "bearer <token>")
+	tokenStr := strings.TrimSpace(string(tokenOutput))
+	if !strings.HasPrefix(strings.ToLower(tokenStr), "bearer ") {
+		return fmt.Errorf("unexpected token format: %s", tokenStr)
+	}
+	
+	c.accessToken = strings.TrimSpace(tokenStr[7:]) // Remove "bearer " prefix
+	c.apiEndpoint = strings.TrimSuffix(apiEndpoint, "/")
+	
+	log.Printf("Successfully authenticated via cf CLI")
+	return nil
+}
+
+func (c *CFClient) authenticateWithCredentials(apiEndpoint, username, password string) error {
+	c.apiEndpoint = strings.TrimSuffix(apiEndpoint, "/")
+	
+	// Try cf CLI authentication (most reliable)
+	if err := c.authenticateWithCFCLI(apiEndpoint, username, password); err == nil {
+		return nil
+	}
+	
+	log.Printf("CF CLI authentication failed, falling back to direct OAuth")
+	return fmt.Errorf("authentication failed - cf CLI method unsuccessful")
+}
+
+
+func (c *CFClient) apiCall(endpoint string) ([]byte, error) {
+	if c.useDirectAPI {
+		return c.directAPICall(endpoint)
+	}
+	return c.cfCurl(endpoint)
+}
+
+func (c *CFClient) directAPICall(endpoint string) ([]byte, error) {
+	url := c.apiEndpoint + endpoint
+	
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Accept", "application/json")
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API call failed with status %d", resp.StatusCode)
+	}
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	
+	return body, nil
 }
 
 func (c *CFClient) cfCurl(endpoint string) ([]byte, error) {
@@ -94,7 +211,7 @@ func (c *CFClient) loadAllPages(url string) ([]json.RawMessage, error) {
 	var allResources []json.RawMessage
 	
 	for url != "" && url != "null" {
-		data, err := c.cfCurl(url)
+		data, err := c.apiCall(url)
 		if err != nil {
 			return nil, err
 		}
@@ -225,7 +342,7 @@ func (c *CFClient) isServiceInstanceBillable(instance ServiceInstance) (bool, st
 
 func (c *CFClient) getUsageSummary(orgGUID string) (*UsageSummary, error) {
 	endpoint := fmt.Sprintf("/v3/organizations/%s/usage_summary", orgGUID)
-	data, err := c.cfCurl(endpoint)
+	data, err := c.apiCall(endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +659,10 @@ func runServer(client *CFClient, config *Config) {
 
 func main() {
 	config := parseFlags()
-	client := NewCFClient()
+	client, err := NewCFClient()
+	if err != nil {
+		log.Fatalf("Failed to create CF client: %v", err)
+	}
 	
 	// Load service plans and offerings for billable service instance detection
 	if config.Verbose {
