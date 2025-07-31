@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -75,7 +76,6 @@ type CFClient struct {
 	serviceOfferings map[string]ServiceOffering
 	apiEndpoint      string
 	accessToken      string
-	useDirectAPI     bool
 }
 
 func NewCFClient() (*CFClient, error) {
@@ -110,63 +110,150 @@ func NewCFClient() (*CFClient, error) {
 		if err := client.authenticateWithCredentials(apiEndpoint, username, password); err != nil {
 			return nil, fmt.Errorf("failed to authenticate with CF API: %w", err)
 		}
-		client.useDirectAPI = true
 		log.Printf("Using environment variable credentials with direct API calls")
 	} else {
-		log.Printf("Using cf CLI for API calls (set CF_API_ENDPOINT, CF_USERNAME, CF_PASSWORD for direct API access)")
+		return nil, fmt.Errorf("CF_API_ENDPOINT, CF_USERNAME, and CF_PASSWORD environment variables are required")
 	}
 	
 	return client, nil
 }
 
 
-func (c *CFClient) authenticateWithCFCLI(apiEndpoint, username, password string) error {
-	log.Printf("Attempting authentication via cf CLI...")
+func (c *CFClient) discoverAuthEndpoint(apiEndpoint string) (string, error) {
+	infoURL := apiEndpoint + "/v2/info"
 	
-	// Login using cf CLI
-	loginCmd := exec.Command("cf", "login", "-a", apiEndpoint, "-u", username, "-p", password, "--skip-ssl-validation")
-	if output, err := loginCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("cf login failed: %w\nOutput: %s", err, string(output))
-	}
-	
-	// Get OAuth token from cf CLI
-	tokenCmd := exec.Command("cf", "oauth-token")
-	tokenOutput, err := tokenCmd.Output()
+	req, err := http.NewRequest("GET", infoURL, nil)
 	if err != nil {
-		return fmt.Errorf("failed to get oauth token: %w", err)
+		return "", err
 	}
 	
-	// Parse token (format is "bearer <token>")
-	tokenStr := strings.TrimSpace(string(tokenOutput))
-	if !strings.HasPrefix(strings.ToLower(tokenStr), "bearer ") {
-		return fmt.Errorf("unexpected token format: %s", tokenStr)
+	req.Header.Set("Accept", "application/json")
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to get API info: status %d", resp.StatusCode)
 	}
 	
-	c.accessToken = strings.TrimSpace(tokenStr[7:]) // Remove "bearer " prefix
-	c.apiEndpoint = strings.TrimSuffix(apiEndpoint, "/")
+	var info struct {
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+	}
 	
-	log.Printf("Successfully authenticated via cf CLI")
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return "", err
+	}
+	
+	if info.AuthorizationEndpoint == "" {
+		return "", fmt.Errorf("no authorization endpoint found in API info")
+	}
+	
+	// Convert authorization endpoint to token endpoint
+	authEndpoint := strings.TrimSuffix(info.AuthorizationEndpoint, "/")
+	tokenEndpoint := authEndpoint + "/oauth/token"
+	
+	log.Printf("Discovered OAuth token endpoint: %s", tokenEndpoint)
+	return tokenEndpoint, nil
+}
+
+func (c *CFClient) authenticateDirectly(tokenURL, username, password string) error {
+	// Standard CF client credentials - try the most common one first
+	clientID := "cf"
+	clientSecret := ""
+	
+	// Check for custom client credentials from environment
+	if envClientID := os.Getenv("CF_CLIENT_ID"); envClientID != "" {
+		clientID = envClientID
+		clientSecret = os.Getenv("CF_CLIENT_SECRET")
+		log.Printf("Using custom OAuth client credentials from environment")
+	}
+	
+	// Prepare the request payload
+	data := url.Values{}
+	data.Set("grant_type", "password")
+	data.Set("username", username)
+	data.Set("password", password)
+	
+	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	
+	// Set headers
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	
+	// Add client credentials if we have them
+	if clientSecret != "" {
+		credentials := base64.StdEncoding.EncodeToString([]byte(clientID + ":" + clientSecret))
+		req.Header.Set("Authorization", "Basic "+credentials)
+	} else {
+		// Standard CF CLI client (public client)
+		credentials := base64.StdEncoding.EncodeToString([]byte(clientID + ":"))
+		req.Header.Set("Authorization", "Basic "+credentials)
+	}
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(body))
+	}
+	
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+	}
+	
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return err
+	}
+	
+	c.accessToken = tokenResp.AccessToken
+	log.Printf("Successfully authenticated via direct OAuth")
 	return nil
 }
 
 func (c *CFClient) authenticateWithCredentials(apiEndpoint, username, password string) error {
 	c.apiEndpoint = strings.TrimSuffix(apiEndpoint, "/")
 	
-	// Try cf CLI authentication (most reliable)
-	if err := c.authenticateWithCFCLI(apiEndpoint, username, password); err == nil {
-		return nil
+	// Discover the OAuth endpoint
+	tokenURL, err := c.discoverAuthEndpoint(c.apiEndpoint)
+	if err != nil {
+		log.Printf("Failed to discover OAuth endpoint: %v", err)
+		
+		// Try common endpoints as fallback
+		fallbackURLs := []string{
+			strings.Replace(apiEndpoint, "api.", "uaa.", 1) + "/oauth/token", // UAA endpoint
+			apiEndpoint + "/uaa/oauth/token",                                  // Newer CF/TAS
+			apiEndpoint + "/oauth/token",                                      // Older CF
+		}
+		
+		for _, fallbackURL := range fallbackURLs {
+			log.Printf("Trying fallback endpoint: %s", fallbackURL)
+			if err := c.authenticateDirectly(fallbackURL, username, password); err == nil {
+				return nil
+			} else {
+				log.Printf("Fallback endpoint failed: %v", err)
+			}
+		}
+		
+		return fmt.Errorf("authentication failed at all endpoints")
 	}
 	
-	log.Printf("CF CLI authentication failed, falling back to direct OAuth")
-	return fmt.Errorf("authentication failed - cf CLI method unsuccessful")
+	// Try the discovered endpoint
+	return c.authenticateDirectly(tokenURL, username, password)
 }
 
 
 func (c *CFClient) apiCall(endpoint string) ([]byte, error) {
-	if c.useDirectAPI {
-		return c.directAPICall(endpoint)
-	}
-	return c.cfCurl(endpoint)
+	return c.directAPICall(endpoint)
 }
 
 func (c *CFClient) directAPICall(endpoint string) ([]byte, error) {
@@ -198,14 +285,6 @@ func (c *CFClient) directAPICall(endpoint string) ([]byte, error) {
 	return body, nil
 }
 
-func (c *CFClient) cfCurl(endpoint string) ([]byte, error) {
-	cmd := exec.Command("cf", "curl", endpoint)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("cf curl failed: %w", err)
-	}
-	return output, nil
-}
 
 func (c *CFClient) loadAllPages(url string) ([]json.RawMessage, error) {
 	var allResources []json.RawMessage
