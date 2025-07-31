@@ -10,9 +10,8 @@ applications:
   health-check-http-endpoint: /health
   timeout: 180
   env:
-    # Set your CF API endpoint - usually the same CF instance you're deploying to
-    CF_API_ENDPOINT: https://api.sys.tas.7dd6b553.shepherd.tanzu.broadcom.net
     # Use variables from cf push --var flags
+    CF_API_ENDPOINT: ((CF_API_ENDPOINT))
     CF_USERNAME: ((CF_USERNAME))
     CF_PASSWORD: ((CF_PASSWORD))
     CF_SKIP_SSL_VALIDATION: ((CF_SKIP_SSL_VALIDATION))

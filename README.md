@@ -112,18 +112,19 @@ You can also deploy this application to Cloud Foundry itself. See the example fi
   
 ### Deploying to Cloud Foundry
 
-**Option 1: Set environment variables in manifest (easiest)**
+**Option 1: Use cf push with variables (recommended)**
 ```bash
-# 1. Edit manifest.yml and uncomment/set the env vars:
+cf push --var CF_API_ENDPOINT=https://api.your-cf-domain.com --var CF_USERNAME=admin --var CF_PASSWORD=your-password --var CF_SKIP_SSL_VALIDATION=false
+```
+
+**Option 2: Set environment variables directly in manifest**
+```bash
+# 1. Edit manifest.yml and replace variable placeholders with actual values:
+#    CF_API_ENDPOINT: https://api.your-cf-domain.com
 #    CF_USERNAME: admin
 #    CF_PASSWORD: your-password-here
 # 2. Deploy
 cf push
-```
-
-**Option 2: Use cf push with environment variables**
-```bash
-cf push --var CF_USERNAME=admin --var CF_PASSWORD=your-password
 ```
 
 **Option 3: Set environment variables after push (most secure)**
@@ -132,8 +133,10 @@ cf push --var CF_USERNAME=admin --var CF_PASSWORD=your-password
 cf push --no-start
 
 # 2. Set environment variables
+cf set-env tpcf-usage-service CF_API_ENDPOINT "https://api.your-cf-domain.com"
 cf set-env tpcf-usage-service CF_USERNAME "admin"
 cf set-env tpcf-usage-service CF_PASSWORD "your-password-here"
+cf set-env tpcf-usage-service CF_SKIP_SSL_VALIDATION "false"
 
 # 3. Start the application
 cf start tpcf-usage-service
@@ -150,8 +153,11 @@ cf logs tpcf-usage-service --recent
 - The app uses the Go buildpack and builds automatically during `cf push`
 - Health checks are configured to use the `/health` endpoint
 - The app will listen on the `$PORT` environment variable provided by CF
-- Credentials are set via `cf set-env` to avoid storing passwords in the manifest
+- The manifest uses variable substitution `((VARIABLE_NAME))` for flexible deployments
+- **Binary location**: The compiled binary is located at `./bin/tpcf-usage-service`
+- **Auto-start**: Uses `TPCF_SERVER_MODE=true` to automatically start in server mode
 - The app can monitor the same CF instance it's deployed to, or a different one
+- **Metrics endpoint**: Available at `https://your-app-route/metrics`
 
 ## Options
 
