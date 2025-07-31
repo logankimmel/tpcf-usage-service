@@ -70,6 +70,27 @@ type UsageSummary struct {
 	} `json:"usage_summary"`
 }
 
+type AppUsageReport struct {
+	ReportTime      string          `json:"report_time"`
+	MonthlyReports  []MonthlyReport `json:"monthly_reports"`
+	YearlyReports   []YearlyReport  `json:"yearly_reports"`
+}
+
+type MonthlyReport struct {
+	Month                int     `json:"month"`
+	Year                 int     `json:"year"`
+	AverageAppInstances  float64 `json:"average_app_instances"`
+	MaximumAppInstances  int     `json:"maximum_app_instances"`
+	AppInstanceHours     float64 `json:"app_instance_hours"`
+}
+
+type YearlyReport struct {
+	Year                int     `json:"year"`
+	AverageAppInstances float64 `json:"average_app_instances"`
+	MaximumAppInstances int     `json:"maximum_app_instances"`
+	AppInstanceHours    float64 `json:"app_instance_hours"`
+}
+
 type CFClient struct {
 	httpClient       *http.Client
 	servicePlans     map[string]ServicePlan
@@ -434,6 +455,43 @@ func (c *CFClient) getUsageSummary(orgGUID string) (*UsageSummary, error) {
 	return &summary, nil
 }
 
+func (c *CFClient) getAppUsageReport() (*AppUsageReport, error) {
+	// The app-usage endpoint needs to be constructed from the API endpoint
+	// Replace api.sys.domain with app-usage.sys.domain
+	appUsageEndpoint := strings.Replace(c.apiEndpoint, "api.", "app-usage.", 1)
+	reportURL := appUsageEndpoint + "/system_report/app_usages"
+	
+	req, err := http.NewRequest("GET", reportURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Accept", "application/json")
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("app usage report request failed with status %d", resp.StatusCode)
+	}
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	
+	var report AppUsageReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		return nil, fmt.Errorf("failed to parse app usage report: %w", err)
+	}
+	
+	return &report, nil
+}
+
 type Config struct {
 	SkipOrgs        []string
 	Verbose         bool
@@ -449,6 +507,8 @@ type UsageResult struct {
 	TotalBillableAIs      int        `json:"total_billable_ais"`     // Excludes system org
 	TotalSIs              int        `json:"total_sis"`
 	TotalBillableSIs      int        `json:"total_billable_sis"`
+	MonthlyMaxBillableAIs int        `json:"monthly_max_billable_ais"` // Maximum billable AIs this month
+	YearlyMaxBillableAIs  int        `json:"yearly_max_billable_ais"`  // Maximum billable AIs this year
 }
 
 type OrgUsage struct {
@@ -561,12 +621,47 @@ func collectUsageData(client *CFClient, config *Config) (*UsageResult, error) {
 		})
 	}
 	
+	// Fetch monthly max billable AIs from app usage report
+	monthlyMaxBillableAIs := 0
+	yearlyMaxBillableAIs := 0
+	
+	if appReport, err := client.getAppUsageReport(); err != nil {
+		log.Printf("Failed to get app usage report: %v", err)
+		// Continue without monthly/yearly max data
+	} else {
+		// Get current month's max instances
+		currentTime := time.Now()
+		currentMonth := int(currentTime.Month())
+		currentYear := currentTime.Year()
+		
+		for _, monthlyReport := range appReport.MonthlyReports {
+			if monthlyReport.Month == currentMonth && monthlyReport.Year == currentYear {
+				monthlyMaxBillableAIs = monthlyReport.MaximumAppInstances
+				break
+			}
+		}
+		
+		// Get current year's max instances
+		for _, yearlyReport := range appReport.YearlyReports {
+			if yearlyReport.Year == currentYear {
+				yearlyMaxBillableAIs = yearlyReport.MaximumAppInstances
+				break
+			}
+		}
+		
+		if config.Verbose {
+			log.Printf("Monthly max billable AIs: %d, Yearly max billable AIs: %d", monthlyMaxBillableAIs, yearlyMaxBillableAIs)
+		}
+	}
+	
 	return &UsageResult{
-		Organizations:    orgUsages,
-		TotalAIs:         totalAIs,
-		TotalBillableAIs: totalBillableAIs,
-		TotalSIs:         totalSIs,
-		TotalBillableSIs: totalBillableSIs,
+		Organizations:         orgUsages,
+		TotalAIs:             totalAIs,
+		TotalBillableAIs:     totalBillableAIs,
+		TotalSIs:             totalSIs,
+		TotalBillableSIs:     totalBillableSIs,
+		MonthlyMaxBillableAIs: monthlyMaxBillableAIs,
+		YearlyMaxBillableAIs:  yearlyMaxBillableAIs,
 	}, nil
 }
 
@@ -589,6 +684,14 @@ func formatPrometheusMetrics(result *UsageResult) string {
 	metrics.WriteString("# HELP cf_total_billable_service_instances Total number of billable service instances across all organizations\n")
 	metrics.WriteString("# TYPE cf_total_billable_service_instances gauge\n")
 	metrics.WriteString(fmt.Sprintf("cf_total_billable_service_instances %d\n", result.TotalBillableSIs))
+	
+	metrics.WriteString("# HELP cf_monthly_max_billable_application_instances Maximum billable application instances this month\n")
+	metrics.WriteString("# TYPE cf_monthly_max_billable_application_instances gauge\n")
+	metrics.WriteString(fmt.Sprintf("cf_monthly_max_billable_application_instances %d\n", result.MonthlyMaxBillableAIs))
+	
+	metrics.WriteString("# HELP cf_yearly_max_billable_application_instances Maximum billable application instances this year\n")
+	metrics.WriteString("# TYPE cf_yearly_max_billable_application_instances gauge\n")
+	metrics.WriteString(fmt.Sprintf("cf_yearly_max_billable_application_instances %d\n", result.YearlyMaxBillableAIs))
 	
 	// Per-organization metrics
 	metrics.WriteString("# HELP cf_org_application_instances Number of application instances per organization\n")
@@ -794,5 +897,7 @@ func main() {
 		}
 		fmt.Printf("Total AIs: %d (Billable: %d)\n", result.TotalAIs, result.TotalBillableAIs)
 		fmt.Printf("Total SIs: %d (Billable: %d)\n", result.TotalSIs, result.TotalBillableSIs)
+		fmt.Printf("Monthly Max Billable AIs: %d\n", result.MonthlyMaxBillableAIs)
+		fmt.Printf("Yearly Max Billable AIs: %d\n", result.YearlyMaxBillableAIs)
 	}
 }
