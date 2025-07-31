@@ -112,19 +112,35 @@ You can also deploy this application to Cloud Foundry itself. See the example fi
 
 ### Deploying to Cloud Foundry
 
+**Option 1: Set environment variables in manifest (easiest)**
 ```bash
-# 1. Update manifest.yml with your CF domain and API endpoint
-# 2. Set sensitive environment variables (don't put passwords in manifest!)
+# 1. Edit manifest.yml and uncomment/set the env vars:
+#    CF_USERNAME: admin
+#    CF_PASSWORD: your-password-here
+# 2. Deploy
+cf push
+```
+
+**Option 2: Use cf push with environment variables**
+```bash
+cf push --var CF_USERNAME=admin --var CF_PASSWORD=your-password
+```
+
+**Option 3: Set environment variables after push (most secure)**
+```bash
+# 1. Push without credentials (will fail to start)
+cf push --no-start
+
+# 2. Set environment variables
 cf set-env tpcf-usage-service CF_USERNAME "admin"
 cf set-env tpcf-usage-service CF_PASSWORD "your-password-here"
 
-# 3. Optional: Set other environment variables
-cf set-env tpcf-usage-service CF_SKIP_SSL_VALIDATION "false"
+# 3. Start the application
+cf start tpcf-usage-service
+```
 
-# 4. Deploy the application
-cf push
-
-# 5. Check the application is running
+**Check deployment:**
+```bash
 cf apps
 cf logs tpcf-usage-service --recent
 ```

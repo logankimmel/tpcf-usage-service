@@ -12,9 +12,9 @@ applications:
   env:
     # Set your CF API endpoint - usually the same CF instance you're deploying to
     CF_API_ENDPOINT: https://api.your-cf-domain.com
-    # These will be set via cf set-env commands (see deployment instructions)
+    # Set credentials directly in manifest (NOT recommended for production)
     # CF_USERNAME: admin
-    # CF_PASSWORD: your-password
+    # CF_PASSWORD: your-password-here
     # CF_SKIP_SSL_VALIDATION: false
   command: ./tpcf-usage-service --server --verbose
   # routes:
