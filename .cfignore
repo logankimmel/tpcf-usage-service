@@ -1,0 +1,28 @@
+# Ignore build artifacts
+tpcf-usage-service
+*.exe
+
+# Ignore development files
+.git/
+.gitignore
+README.md
+Dockerfile
+k8s-deployment.yaml
+
+# Ignore Go build cache and modules cache
+.cache/
+vendor/
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore test files
+*_test.go
+test/
+
+# Ignore documentation
+docs/
+*.md

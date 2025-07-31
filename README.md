@@ -104,6 +104,39 @@ docker build -t your-registry/tpcf-usage-service:latest .
 kubectl apply -f k8s-deployment.yaml
 ```
 
+## Cloud Foundry Deployment
+
+You can also deploy this application to Cloud Foundry itself. See the example file:
+
+- **Cloud Foundry**: `manifest.yml` - CF deployment manifest with health checks and environment configuration
+
+### Deploying to Cloud Foundry
+
+```bash
+# 1. Update manifest.yml with your CF domain and API endpoint
+# 2. Set sensitive environment variables (don't put passwords in manifest!)
+cf set-env tpcf-usage-service CF_USERNAME "admin"
+cf set-env tpcf-usage-service CF_PASSWORD "your-password-here"
+
+# 3. Optional: Set other environment variables
+cf set-env tpcf-usage-service CF_SKIP_SSL_VALIDATION "false"
+
+# 4. Deploy the application
+cf push
+
+# 5. Check the application is running
+cf apps
+cf logs tpcf-usage-service --recent
+```
+
+### CF Deployment Notes
+
+- The app uses the Go buildpack and builds automatically during `cf push`
+- Health checks are configured to use the `/health` endpoint
+- The app will listen on the `$PORT` environment variable provided by CF
+- Credentials are set via `cf set-env` to avoid storing passwords in the manifest
+- The app can monitor the same CF instance it's deployed to, or a different one
+
 ## Options
 
 - `--skip-orgs`: Comma-separated list of organizations to skip (default: "system")

@@ -1,0 +1,21 @@
+---
+applications:
+- name: tpcf-usage-service
+  buildpacks:
+  - go_buildpack
+  memory: 256M
+  disk_quota: 512M
+  instances: 1
+  health-check-type: http
+  health-check-http-endpoint: /health
+  timeout: 180
+  env:
+    # Set your CF API endpoint - usually the same CF instance you're deploying to
+    CF_API_ENDPOINT: https://api.your-cf-domain.com
+    # These will be set via cf set-env commands (see deployment instructions)
+    # CF_USERNAME: admin
+    # CF_PASSWORD: your-password
+    # CF_SKIP_SSL_VALIDATION: false
+  command: ./tpcf-usage-service --server --verbose
+  # routes:
+  # - route: tpcf-usage-service.apps.your-cf-domain.com  # Optional: CF will auto-generate if not specified
