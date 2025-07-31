@@ -106,10 +106,10 @@ kubectl apply -f k8s-deployment.yaml
 
 ## Cloud Foundry Deployment
 
-You can also deploy this application to Cloud Foundry itself. See the example file:
+You can also deploy this application to Cloud Foundry itself. See the example files:
 
 - **Cloud Foundry**: `manifest.yml` - CF deployment manifest with health checks and environment configuration
-
+  
 ### Deploying to Cloud Foundry
 
 **Option 1: Set environment variables in manifest (easiest)**

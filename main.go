@@ -738,6 +738,20 @@ func runServer(client *CFClient, config *Config) {
 
 func main() {
 	config := parseFlags()
+	
+	// Override config with environment variables for CF deployment
+	if os.Getenv("TPCF_SERVER_MODE") == "true" {
+		config.ServerMode = true
+	}
+	if os.Getenv("TPCF_VERBOSE") == "true" {
+		config.Verbose = true
+	}
+	if portStr := os.Getenv("PORT"); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			config.Port = port
+		}
+	}
+	
 	client, err := NewCFClient()
 	if err != nil {
 		log.Fatalf("Failed to create CF client: %v", err)
