@@ -476,6 +476,9 @@ func (c *CFClient) getAppUsageReport() (*AppUsageReport, error) {
 	defer resp.Body.Close()
 	
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == 404 {
+			return nil, fmt.Errorf("app-usage service not found (not deployed in this foundation)")
+		}
 		return nil, fmt.Errorf("app usage report request failed with status %d", resp.StatusCode)
 	}
 	
@@ -626,8 +629,10 @@ func collectUsageData(client *CFClient, config *Config) (*UsageResult, error) {
 	yearlyMaxBillableAIs := 0
 	
 	if appReport, err := client.getAppUsageReport(); err != nil {
-		log.Printf("Failed to get app usage report: %v", err)
-		// Continue without monthly/yearly max data
+		if config.Verbose {
+			log.Printf("App usage report not available (this is normal if app-usage service is not deployed): %v", err)
+		}
+		// Continue without monthly/yearly max data - this is expected in many foundations
 	} else {
 		// Get current month's max instances
 		currentTime := time.Now()
@@ -897,7 +902,11 @@ func main() {
 		}
 		fmt.Printf("Total AIs: %d (Billable: %d)\n", result.TotalAIs, result.TotalBillableAIs)
 		fmt.Printf("Total SIs: %d (Billable: %d)\n", result.TotalSIs, result.TotalBillableSIs)
-		fmt.Printf("Monthly Max Billable AIs: %d\n", result.MonthlyMaxBillableAIs)
-		fmt.Printf("Yearly Max Billable AIs: %d\n", result.YearlyMaxBillableAIs)
+		if result.MonthlyMaxBillableAIs > 0 || result.YearlyMaxBillableAIs > 0 {
+			fmt.Printf("Monthly Max Billable AIs: %d\n", result.MonthlyMaxBillableAIs)
+			fmt.Printf("Yearly Max Billable AIs: %d\n", result.YearlyMaxBillableAIs)
+		} else if config.Verbose {
+			fmt.Printf("Monthly/Yearly max data: Not available (app-usage service not deployed)\n")
+		}
 	}
 }
