@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cf-credentials
+  namespace: default
+type: Opaque
+stringData:
+  username: "admin"
+  password: "your-password-here"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tpcf-usage-service
+  namespace: default
+  labels:
+    app: tpcf-usage-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tpcf-usage-service
+  template:
+    metadata:
+      labels:
+        app: tpcf-usage-service
+    spec:
+      containers:
+      - name: tpcf-usage-service
+        image: your-registry/tpcf-usage-service:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: CF_API_ENDPOINT
+          value: "https://api.your-cf-domain.com"
+        - name: CF_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: cf-credentials
+              key: username
+        - name: CF_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: cf-credentials
+              key: password
+        - name: CF_SKIP_SSL_VALIDATION
+          value: "false"
+        args: ["--server", "--refresh-interval", "60", "--verbose"]
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tpcf-usage-service
+  namespace: default
+  labels:
+    app: tpcf-usage-service
+spec:
+  selector:
+    app: tpcf-usage-service
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  type: ClusterIP
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tpcf-usage-service
+  namespace: default
+  labels:
+    app: tpcf-usage-service
+spec:
+  selector:
+    matchLabels:
+      app: tpcf-usage-service
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 300s
+    scrapeTimeout: 30s

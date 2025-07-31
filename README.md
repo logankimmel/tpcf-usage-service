@@ -1,18 +1,41 @@
 # CF Usage Service
 
-A Go application that connects to the Cloud Foundry API to count billable Application Instances (AIs) and Service Instances (SIs) across organizations. The application identifies truly billable service instances by analyzing service plans and offerings, filtering out non-billable services like user-provided services.
+A production-ready Go application that connects to the Cloud Foundry API to count billable Application Instances (AIs) and Service Instances (SIs) across organizations. The application identifies truly billable service instances by analyzing service plans and offerings, filtering out non-billable services like user-provided services.
 
 Can run as a CLI tool for one-time reporting or as a web server exposing Prometheus metrics.
 
 ## Prerequisites
 
 - Go 1.19 or later
-- CF CLI installed and authenticated to your Cloud Foundry foundation
+- Cloud Foundry credentials (username/password)
 
 ## Building
 
 ```bash
-go build -o cf-usage-service
+go build -o tpcf-usage-service
+```
+
+## Authentication
+
+The application uses environment variables for authentication and requires **no CF CLI installation**:
+
+### Required Environment Variables
+
+```bash
+export CF_API_ENDPOINT="https://api.your-cf-domain.com"
+export CF_USERNAME="your-username"
+export CF_PASSWORD="your-password"
+```
+
+### Optional Environment Variables
+
+```bash
+# Skip SSL certificate verification (for development environments)
+export CF_SKIP_SSL_VALIDATION=true
+
+# Custom OAuth client credentials (if required by your CF environment)
+export CF_CLIENT_ID="custom-client"
+export CF_CLIENT_SECRET="custom-secret"
 ```
 
 ## Usage
@@ -21,35 +44,35 @@ go build -o cf-usage-service
 
 ```bash
 # Basic usage (skips 'system' org by default)
-./cf-usage-service
+CF_API_ENDPOINT=https://api.your-cf.com CF_USERNAME=admin CF_PASSWORD=secret ./tpcf-usage-service
 
 # Skip multiple orgs
-./cf-usage-service --skip-orgs "system,another-org"
+./tpcf-usage-service --skip-orgs "system,another-org"
 
 # Verbose output
-./cf-usage-service --verbose
+./tpcf-usage-service --verbose
 
 # JSON output for automation
-./cf-usage-service --json
+./tpcf-usage-service --json
 
-# JSON output with specific orgs skipped
-./cf-usage-service --json --skip-orgs "system,test-org"
+# Skip SSL validation (for dev environments)
+CF_SKIP_SSL_VALIDATION=true ./tpcf-usage-service
 ```
 
 ### Server Mode (Prometheus metrics)
 
 ```bash
 # Start web server on default port 8080 (refreshes every hour)
-./cf-usage-service --server
+CF_API_ENDPOINT=https://api.your-cf.com CF_USERNAME=admin CF_PASSWORD=secret ./tpcf-usage-service --server
 
 # Start on custom port
-./cf-usage-service --server --port 9090
+./tpcf-usage-service --server --port 9090
 
 # Custom refresh interval (refresh every 30 minutes)
-./cf-usage-service --server --refresh-interval 30
+./tpcf-usage-service --server --refresh-interval 30
 
 # Server with verbose logging
-./cf-usage-service --server --verbose
+./tpcf-usage-service --server --verbose
 ```
 
 **Endpoints:**
@@ -60,6 +83,26 @@ go build -o cf-usage-service
 - Fetches data from Cloud Foundry API on startup and then periodically based on `--refresh-interval`
 - Metrics endpoint returns cached data (no API calls on each request)
 - Background refresh continues until server shutdown
+
+## Container Deployment
+
+The application is container-ready with no external dependencies. See the example files:
+
+- **Docker**: `Dockerfile` - Multi-stage build for minimal container image
+- **Kubernetes**: `k8s-deployment.yaml` - Complete deployment with secrets, service, and ServiceMonitor for Prometheus
+
+### Building the Container
+
+```bash
+docker build -t your-registry/tpcf-usage-service:latest .
+```
+
+### Kubernetes Deployment
+
+```bash
+# Update k8s-deployment.yaml with your CF endpoint and credentials
+kubectl apply -f k8s-deployment.yaml
+```
 
 ## Options
 
@@ -74,6 +117,10 @@ go build -o cf-usage-service
 
 ### Standard Output
 ```
+2025/07/31 09:54:21 WARNING: SSL certificate verification is disabled
+2025/07/31 09:54:21 Discovered OAuth token endpoint: https://login.sys.tas.example.com/oauth/token
+2025/07/31 09:54:22 Successfully authenticated via direct OAuth
+2025/07/31 09:54:22 Using environment variable credentials with direct API calls
 Loading service plans and offerings...
 Processing my-org...
 AIs: 25
@@ -161,16 +208,24 @@ scrape_configs:
     metrics_path: '/metrics'
 ```
 
-## Migration from Bash Script
+## Authentication Flow
 
-This application replaces the original `get-usage-count.sh` bash script with:
+The application uses a pure OAuth 2.0 implementation:
 
-- **Accurate billable service instance counting** via service plan/offering analysis
-- Better error handling and logging
-- Configurable organization filtering
-- JSON output for automation
-- Proper Go module structure
-- Cross-platform compatibility
+1. **Endpoint Discovery**: Queries `/v2/info` to discover the OAuth authorization endpoint
+2. **Direct OAuth Authentication**: Uses password grant flow with discovered endpoint
+3. **Token Management**: Extracts and uses Bearer tokens for all API calls
+4. **Fallback Logic**: Tries common endpoints if discovery fails
+5. **No External Dependencies**: Pure Go HTTP client, no CF CLI required
+
+## Production Features
+
+- **Environment Variable Configuration**: All settings via env vars for containerization
+- **SSL Flexibility**: Can skip SSL validation for development environments
+- **Custom OAuth Clients**: Supports custom client credentials if required
+- **Graceful Error Handling**: Clear error messages and proper HTTP status codes
+- **Direct API Access**: High-performance HTTP calls without subprocess overhead
+- **Container Ready**: Single binary with no external dependencies
 
 ## Billable Service Detection
 
@@ -180,6 +235,11 @@ The application determines which service instances are billable by:
 2. Fetching all service offerings from `/v3/service_offerings`
 3. For each service instance, looking up its service plan GUID
 4. Using the plan's service offering GUID to identify the offering name
-5. Filtering out known non-billable offerings (e.g., "user-provided", "app-autoscaler")
+5. Filtering against known billable offerings:
+   - `p.mysql` / `p-mysql`
+   - `p.rabbitmq` / `p-rabbitmq` 
+   - `p.redis` / `p-redis`
+   - `postgres`
+   - `genai` / `genai-service`
 
 This provides more accurate billing counts compared to the simple service instance count from the usage summary endpoint.
